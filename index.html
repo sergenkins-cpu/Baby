@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Моя Радионяня</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; background: #121214; color: #fff; text-align: center; padding: 20px; }
+        .card { background: #1c1c1e; padding: 25px; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); max-width: 400px; margin: 20px auto; }
+        button { background: #0a84ff; color: white; border: none; padding: 16px; font-size: 16px; font-weight: bold; border-radius: 12px; cursor: pointer; width: 100%; margin: 10px 0; }
+        .btn-child { background: #34c759; }
+        .hidden { display: none; }
+        video { width: 100%; border-radius: 12px; background: #000; margin-top: 10px; }
+        .alert { background: #ff453a; color: white; padding: 15px; border-radius: 12px; font-weight: bold; animation: blink 1s infinite; margin-top: 15px; }
+        @keyframes blink { 50% { opacity: 0.5; } }
+    </style>
+</head>
+<body>
+    <div class="card" id="setup-screen">
+        <h2>Моя Личная Радионяня</h2>
+        <p>Выберите режим для этого iPhone:</p>
+        <button class="btn-child" onclick="init('child')">👶 Оставить у ребенка</button>
+        <button onclick="init('parent')">👨‍👩‍👦 Забрать с собой</button>
+    </div>
+
+    <!-- РЕЖИМ РЕБЕНКА -->
+    <div class="card hidden" id="child-screen">
+        <h3>Режим: Малыш 👶</h3>
+        <p id="c-status">Нажмите кнопку для запуска датчика</p>
+        <button onclick="startChild()">Включить датчик шума</button>
+        <video id="c-preview" autoplay playsinline muted></video>
+    </div>
+
+    <!-- РЕЖИМ РОДИТЕЛЯ -->
+    <div class="card hidden" id="parent-screen">
+        <h3>Режим: Родитель 👨‍👩‍👦</h3>
+        <p id="p-status">Слушаю комнату...</p>
+        <div id="alarm" class="alert hidden">⚠️ РЕБЕНОК ПЛАЧЕТ!</div>
+        <button id="view-btn" onclick="connect()" disabled>📺 Включить камеру</button>
+        <video id="p-stream" autoplay playsinline></video>
+        <audio id="siren" loop src="https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg"></audio>
+    </div>
+
+    <script>
+        let mode = "", stream = null, pc = null;
+        const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        // Личный уникальный канал на базе вашего домена
+        const channel = window.location.hostname + "_baby_room";
+
+        function init(r) {
+            mode = r;
+            document.getElementById('setup-screen').classList.add('hidden');
+            document.getElementById(r + '-screen').classList.remove('hidden');
+            if(r === 'parent') {
+                document.body.addEventListener('click', () => { document.getElementById('siren').play().then(() => document.getElementById('siren').pause()); }, {once:true});
+                listen();
+            }
+        }
+
+        // Логика ребенка
+        async function startChild() {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+            document.getElementById('c-preview').srcObject = stream;
+            document.getElementById('c-status').innerText = "Система активна. Анализ звука...";
+            
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const src = ctx.createMediaStreamSource(stream);
+            const ans = ctx.createAnalyser();
+            src.connect(ans);
+            const data = new Uint8Array(ans.frequencyBinCount);
+
+            setInterval(() => {
+                ans.getByteFrequencyData(data);
+                let sum = 0; for(let v of data) sum += v;
+                if((sum / data.length) > 20) { // Порог шума
+                    localStorage.setItem(channel + '_alarm', Date.now());
+                }
+            }, 300);
+
+            setInterval(() => {
+                if(localStorage.getItem(channel + '_req')) {
+                    localStorage.removeItem(channel + '_req');
+                    answer();
+                }
+            }, 1000);
+        }
+
+        async function answer() {
+            pc = new RTCPeerConnection(config);
+            stream.getTracks().forEach(t => pc.addTrack(t, stream));
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            localStorage.setItem(channel + '_offer', JSON.stringify(offer));
+        }
+
+        // Логика родителя
+        function listen() {
+            setInterval(() => {
+                let alarmTime = localStorage.getItem(channel + '_alarm');
+                if(alarmTime && (Date.now() - alarmTime < 4000)) {
+                    document.getElementById('alarm').classList.remove('hidden');
+                    document.getElementById('view-btn').disabled = false;
+                    document.getElementById('siren').play().catch(()=>{});
+                }
+            }, 1000);
+        }
+
+        function connect() {
+            document.getElementById('siren').pause();
+            document.getElementById('alarm').classList.add('hidden');
+            localStorage.setItem(channel + '_req', Date.now());
+            
+            pc = new RTCPeerConnection(config);
+            pc.ontrack = e => document.getElementById('p-stream').srcObject = e.streams[0];
+            
+            let w = setInterval(() => {
+                let off = localStorage.getItem(channel + '_offer');
+                if(off) {
+                    pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(off)));
+                    localStorage.removeItem(channel + '_offer');
+                    clearInterval(w);
+                }
+            }, 1000);
+        }
+    </script>
+</body>
+</html>
