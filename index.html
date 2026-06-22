@@ -3,124 +3,214 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Моя Радионяня</title>
+    <title>Моя Радионяня 5G</title>
     <style>
-        body { font-family: -apple-system, sans-serif; background: #121214; color: #fff; text-align: center; padding: 20px; }
-        .card { background: #1c1c1e; padding: 25px; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); max-width: 400px; margin: 20px auto; }
-        button { background: #0a84ff; color: white; border: none; padding: 16px; font-size: 16px; font-weight: bold; border-radius: 12px; cursor: pointer; width: 100%; margin: 10px 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #121214; color: #ffffff; text-align: center; padding: 20px; margin: 0; }
+        .card { background: #1c1c1e; padding: 25px; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.4); max-width: 400px; margin: 20px auto; box-sizing: border-box; }
+        h2, h3 { margin-top: 0; color: #fff; }
+        p { color: #aeaeb2; font-size: 15px; line-height: 1.4; }
+        button { background: #0a84ff; color: white; border: none; padding: 16px; font-size: 16px; font-weight: bold; border-radius: 12px; cursor: pointer; width: 100%; margin: 10px 0; -webkit-tap-highlight-color: transparent; }
         .btn-child { background: #34c759; }
-        .hidden { display: none; }
-        video { width: 100%; border-radius: 12px; background: #000; margin-top: 10px; }
-        .alert { background: #ff453a; color: white; padding: 15px; border-radius: 12px; font-weight: bold; animation: blink 1s infinite; margin-top: 15px; }
-        @keyframes blink { 50% { opacity: 0.5; } }
+        .hidden { display: none !important; }
+        video { width: 100%; border-radius: 12px; background: #000; margin-top: 15px; transform: scaleX(-1); }
+        #p-stream { transform: none; }
+        .alert { background: #ff453a; color: white; padding: 15px; border-radius: 12px; font-weight: bold; animation: blink 1s infinite; margin-top: 15px; font-size: 18px; }
+        @keyframes blink { 50% { opacity: 0.4; } }
+        .status-active { color: #34c759; font-weight: bold; }
     </style>
 </head>
 <body>
+
+    <!-- Экран выбора режима -->
     <div class="card" id="setup-screen">
-        <h2>Моя Личная Радионяня</h2>
+        <h2>Моя Радионяня 5G</h2>
         <p>Выберите режим для этого iPhone:</p>
-        <button class="btn-child" onclick="init('child')">👶 Оставить у ребенка</button>
-        <button onclick="init('parent')">👨‍👩‍👦 Забрать с собой</button>
+        <button class="btn-child" onclick="initMode('child')">👶 Оставить у ребенка</button>
+        <button onclick="initMode('parent')">👨‍👩‍👦 Забрать с собой</button>
     </div>
 
-    <!-- РЕЖИМ РЕБЕНКА -->
+    <!-- Экран ребенка -->
     <div class="card hidden" id="child-screen">
         <h3>Режим: Малыш 👶</h3>
-        <p id="c-status">Нажмите кнопку для запуска датчика</p>
-        <button onclick="startChild()">Включить датчик шума</button>
+        <p id="c-status">Требуется доступ к датчикам</p>
+        <button id="c-start-btn" onclick="startChildMode()">Включить датчик шума</button>
         <video id="c-preview" autoplay playsinline muted></video>
     </div>
 
-    <!-- РЕЖИМ РОДИТЕЛЯ -->
+    <!-- Экран родителя -->
     <div class="card hidden" id="parent-screen">
         <h3>Режим: Родитель 👨‍👩‍👦</h3>
-        <p id="p-status">Слушаю комнату...</p>
+        <p id="p-status">Подключение к сети...</p>
         <div id="alarm" class="alert hidden">⚠️ РЕБЕНОК ПЛАЧЕТ!</div>
-        <button id="view-btn" onclick="connect()" disabled>📺 Включить камеру</button>
+        <button id="connect-btn" class="hidden" onclick="requestVideo()">📺 Включить видеопоток</button>
         <video id="p-stream" autoplay playsinline></video>
-        <audio id="siren" loop src="https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg"></audio>
     </div>
 
     <script>
-        let mode = "", stream = null, pc = null;
-        const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-        // Личный уникальный канал на базе вашего домена
-        const channel = window.location.hostname + "_baby_room";
+        let currentMode = "";
+        let localStream = null;
+        let peerConnection = null;
+        let ws = null;
 
-        function init(r) {
-            mode = r;
+        // Уникальный идентификатор вашей комнаты на основе логина GitHub
+        const roomId = "sergenkins_cpu_baby_room";
+        // Используем надежный бесплатный публичный эхо-сервер для связи через 5G
+        const wsUrl = `wss://api.piesocket.com/v3/${roomId}?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3YfV0w9IpSg9B&notify=1`;
+
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        function initMode(mode) {
+            currentMode = mode;
             document.getElementById('setup-screen').classList.add('hidden');
-            document.getElementById(r + '-screen').classList.remove('hidden');
-            if(r === 'parent') {
-                document.body.addEventListener('click', () => { document.getElementById('siren').play().then(() => document.getElementById('siren').pause()); }, {once:true});
-                listen();
+            document.getElementById(`${mode}-screen`).classList.remove('hidden');
+            
+            connectToSignaling();
+        }
+
+        function connectToSignaling() {
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                if (currentMode === 'parent') {
+                    document.getElementById('p-status').innerText = "Слушаю комнату... Ожидание звуков.";
+                    document.getElementById('p-status').classList.add('status-active');
+                }
+            };
+
+            ws.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                
+                if (currentMode === 'parent') {
+                    if (data.type === 'cry_alert') {
+                        triggerAlarm();
+                    } else if (data.type === 'webrtc_answer') {
+                        if (peerConnection) {
+                            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                        }
+                    }
+                } 
+                
+                if (currentMode === 'child') {
+                    if (data.type === 'request_video_offer') {
+                        sendVideoOffer();
+                    } else if (data.type === 'webrtc_offer') {
+                        handleVideoOffer(data.sdp);
+                    }
+                }
+            };
+
+            ws.onclose = () => {
+                setTimeout(connectToSignaling, 2000); // Автопереподключение при обрыве 5G
+            };
+        }
+
+        // --- ЛОГИКА ДЛЯ ТЕЛЕФОНА МАЛЫША ---
+        async function startChildMode() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+                document.getElementById('c-preview').srcObject = localStream;
+                document.getElementById('c-start-btn').classList.add('hidden');
+                document.getElementById('c-status').innerText = "Система активна. Анализ звука...";
+                document.getElementById('c-status').classList.add('status-active');
+
+                startAudioAnalysis();
+            } catch (err) {
+                alert("Пожалуйста, разрешите доступ к камере и микрофону в настройках Safari.");
             }
         }
 
-        // Логика ребенка
-        async function startChild() {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-            document.getElementById('c-preview').srcObject = stream;
-            document.getElementById('c-status').innerText = "Система активна. Анализ звука...";
+        function startAudioAnalysis() {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const source = audioContext.createMediaStreamSource(localStream);
+            const analyser = audioContext.createAnalyser();
+            analyser.fftSize = 256;
+            source.connect(analyser);
             
-            const ctx = new (window.AudioContext || window.webkitAudioContext)();
-            const src = ctx.createMediaStreamSource(stream);
-            const ans = ctx.createAnalyser();
-            src.connect(ans);
-            const data = new Uint8Array(ans.frequencyBinCount);
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
 
             setInterval(() => {
-                ans.getByteFrequencyData(data);
-                let sum = 0; for(let v of data) sum += v;
-                if((sum / data.length) > 20) { // Порог шума
-                    localStorage.setItem(channel + '_alarm', Date.now());
+                analyser.getByteFrequencyData(dataArray);
+                let total = 0;
+                for (let i = 0; i < bufferLength; i++) {
+                    total += dataArray[i];
                 }
-            }, 300);
+                let average = total / bufferLength;
 
-            setInterval(() => {
-                if(localStorage.getItem(channel + '_req')) {
-                    localStorage.removeItem(channel + '_req');
-                    answer();
+                // Если уровень шума превышает порог чувствительности (значение 15)
+                if (average > 15) {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'cry_alert' }));
+                    }
                 }
-            }, 1000);
+            }, 400);
         }
 
-        async function answer() {
-            pc = new RTCPeerConnection(config);
-            stream.getTracks().forEach(t => pc.addTrack(t, stream));
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            localStorage.setItem(channel + '_offer', JSON.stringify(offer));
-        }
+        async function sendVideoOffer() {
+            if (!localStream) return;
+            
+            peerConnection = new RTCPeerConnection(rtcConfig);
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
 
-        // Логика родителя
-        function listen() {
-            setInterval(() => {
-                let alarmTime = localStorage.getItem(channel + '_alarm');
-                if(alarmTime && (Date.now() - alarmTime < 4000)) {
-                    document.getElementById('alarm').classList.remove('hidden');
-                    document.getElementById('view-btn').disabled = false;
-                    document.getElementById('siren').play().catch(()=>{});
+            peerConnection.onicecandidate = (event) => {
+                if (!event.candidate && peerConnection.localDescription) {
+                    ws.send(JSON.stringify({
+                        type: 'webrtc_offer',
+                        sdp: peerConnection.localDescription
+                    }));
                 }
-            }, 1000);
+            };
+
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
         }
 
-        function connect() {
-            document.getElementById('siren').pause();
+        // --- ЛОГИКА ДЛЯ ТЕЛЕФОНА РОДИТЕЛЯ ---
+        function triggerAlarm() {
+            document.getElementById('alarm').classList.remove('hidden');
+            document.getElementById('connect-btn').classList.remove('hidden');
+            
+            // Встроенный звук оповещения (используем синтез речи для надежного обхода блокировок звука в iOS)
+            const speech = new SpeechSynthesisUtterance("Внимание! Малыш плачет!");
+            speech.lang = "ru-RU";
+            window.speechSynthesis.speak(speech);
+        }
+
+        function requestVideo() {
             document.getElementById('alarm').classList.add('hidden');
-            localStorage.setItem(channel + '_req', Date.now());
+            document.getElementById('connect-btn').classList.add('hidden');
             
-            pc = new RTCPeerConnection(config);
-            pc.ontrack = e => document.getElementById('p-stream').srcObject = e.streams[0];
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'request_video_offer' }));
+            }
             
-            let w = setInterval(() => {
-                let off = localStorage.getItem(channel + '_offer');
-                if(off) {
-                    pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(off)));
-                    localStorage.removeItem(channel + '_offer');
-                    clearInterval(w);
+            peerConnection = new RTCPeerConnection(rtcConfig);
+            
+            peerConnection.ontrack = (event) => {
+                const remoteVideo = document.getElementById('p-stream');
+                if (remoteVideo.srcObject !== event.streams[0]) {
+                    remoteVideo.srcObject = event.streams[0];
+                    document.getElementById('p-status').innerText = "Трансляция видео подключена.";
                 }
-            }, 1000);
+            };
+        }
+
+        async function handleVideoOffer(sdp) {
+            if (currentMode !== 'parent') return;
+            
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            
+            ws.send(JSON.stringify({
+                type: 'webrtc_answer',
+                sdp: peerConnection.localDescription
+            }));
         }
     </script>
 </body>
