@@ -21,7 +21,6 @@
 </head>
 <body>
 
-    <!-- Экран выбора режима -->
     <div class="card" id="setup-screen">
         <h2>Моя Радионяня 5G</h2>
         <p>Выберите режим для этого iPhone:</p>
@@ -29,7 +28,6 @@
         <button onclick="initMode('parent')">👨‍👩‍👦 Забрать с собой</button>
     </div>
 
-    <!-- Экран ребенка -->
     <div class="card hidden" id="child-screen">
         <h3>Режим: Малыш 👶</h3>
         <p id="c-status">Требуется доступ к датчикам</p>
@@ -37,9 +35,8 @@
         <video id="c-preview" autoplay playsinline muted></video>
     </div>
 
-    <!-- Экран родителя -->
     <div class="card hidden" id="parent-screen">
-        <h3>Режим: Родитель 👨‍👩‍👦</h3>
+        <h3>Режим: ...</h3>
         <p id="p-status">Подключение к сети...</p>
         <div id="alarm" class="alert hidden">⚠️ РЕБЕНОК ПЛАЧЕТ!</div>
         <button id="connect-btn" class="hidden" onclick="requestVideo()">📺 Включить видеопоток</button>
@@ -52,9 +49,7 @@
         let peerConnection = null;
         let ws = null;
 
-        // Уникальный идентификатор вашей комнаты на основе логина GitHub
         const roomId = "sergenkins_cpu_baby_room";
-        // Используем надежный бесплатный публичный эхо-сервер для связи через 5G
         const wsUrl = `wss://api.piesocket.com/v3/${roomId}?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3YfV0w9IpSg9B&notify=1`;
 
         const rtcConfig = {
@@ -69,6 +64,10 @@
             document.getElementById('setup-screen').classList.add('hidden');
             document.getElementById(`${mode}-screen`).classList.remove('hidden');
             
+            if (mode === 'parent') {
+                document.getElementById('parent-screen').getElementsByTagName('h3')[0].innerText = "Режим: Родитель 👨‍👩‍👦";
+                createPeerConnection(); // Создаем соединение заранее
+            }
             connectToSignaling();
         }
 
@@ -84,32 +83,33 @@
 
             ws.onmessage = async (event) => {
                 const data = JSON.parse(event.data);
-                
+                if (data.sender === currentMode) return; // Игнорируем эхо
+
                 if (currentMode === 'parent') {
                     if (data.type === 'cry_alert') {
                         triggerAlarm();
-                    } else if (data.type === 'webrtc_answer') {
-                        if (peerConnection) {
-                            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
-                        }
+                    } else if (data.type === 'webrtc_offer') {
+                        handleVideoOffer(data.sdp);
                     }
                 } 
                 
                 if (currentMode === 'child') {
                     if (data.type === 'request_video_offer') {
                         sendVideoOffer();
-                    } else if (data.type === 'webrtc_offer') {
-                        handleVideoOffer(data.sdp);
+                    } else if (data.type === 'webrtc_answer') {
+                        if (peerConnection) {
+                            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                        }
                     }
                 }
             };
 
             ws.onclose = () => {
-                setTimeout(connectToSignaling, 2000); // Автопереподключение при обрыве 5G
+                setTimeout(connectToSignaling, 2000);
             };
         }
 
-        // --- ЛОГИКА ДЛЯ ТЕЛЕФОНА МАЛЫША ---
+        // --- ЛОГИКА МАЛЫША ---
         async function startChildMode() {
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
@@ -117,10 +117,9 @@
                 document.getElementById('c-start-btn').classList.add('hidden');
                 document.getElementById('c-status').innerText = "Система активна. Анализ звука...";
                 document.getElementById('c-status').classList.add('status-active');
-
                 startAudioAnalysis();
             } catch (err) {
-                alert("Пожалуйста, разрешите доступ к камере и микрофону в настройках Safari.");
+                alert("Пожалуйста, разрешите доступ к камере и микрофону в настройках браузера.");
             }
         }
 
@@ -137,15 +136,12 @@
             setInterval(() => {
                 analyser.getByteFrequencyData(dataArray);
                 let total = 0;
-                for (let i = 0; i < bufferLength; i++) {
-                    total += dataArray[i];
-                }
+                for (let i = 0; i < bufferLength; i++) { total += dataArray[i]; }
                 let average = total / bufferLength;
 
-                // Если уровень шума превышает порог чувствительности (значение 15)
                 if (average > 15) {
                     if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ type: 'cry_alert' }));
+                        ws.send(JSON.stringify({ type: 'cry_alert', sender: 'child' }));
                     }
                 }
             }, 400);
@@ -154,6 +150,7 @@
         async function sendVideoOffer() {
             if (!localStream) return;
             
+            if (peerConnection) { peerConnection.close(); }
             peerConnection = new RTCPeerConnection(rtcConfig);
             localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
 
@@ -161,6 +158,7 @@
                 if (!event.candidate && peerConnection.localDescription) {
                     ws.send(JSON.stringify({
                         type: 'webrtc_offer',
+                        sender: 'child',
                         sdp: peerConnection.localDescription
                     }));
                 }
@@ -170,25 +168,8 @@
             await peerConnection.setLocalDescription(offer);
         }
 
-        // --- ЛОГИКА ДЛЯ ТЕЛЕФОНА РОДИТЕЛЯ ---
-        function triggerAlarm() {
-            document.getElementById('alarm').classList.remove('hidden');
-            document.getElementById('connect-btn').classList.remove('hidden');
-            
-            // Встроенный звук оповещения (используем синтез речи для надежного обхода блокировок звука в iOS)
-            const speech = new SpeechSynthesisUtterance("Внимание! Малыш плачет!");
-            speech.lang = "ru-RU";
-            window.speechSynthesis.speak(speech);
-        }
-
-        function requestVideo() {
-            document.getElementById('alarm').classList.add('hidden');
-            document.getElementById('connect-btn').classList.add('hidden');
-            
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'request_video_offer' }));
-            }
-            
+        // --- ЛОГИКА РОДИТЕЛЯ ---
+        function createPeerConnection() {
             peerConnection = new RTCPeerConnection(rtcConfig);
             
             peerConnection.ontrack = (event) => {
@@ -200,8 +181,28 @@
             };
         }
 
+        function triggerAlarm() {
+            document.getElementById('alarm').classList.remove('hidden');
+            document.getElementById('connect-btn').classList.remove('hidden');
+            
+            const speech = new SpeechSynthesisUtterance("Внимание! Малыш плачет!");
+            speech.lang = "ru-RU";
+            window.speechSynthesis.speak(speech);
+        }
+
+        function requestVideo() {
+            document.getElementById('alarm').classList.add('hidden');
+            document.getElementById('connect-btn').classList.add('hidden');
+            
+            if (!peerConnection) { createPeerConnection(); }
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'request_video_offer', sender: 'parent' }));
+            }
+        }
+
         async function handleVideoOffer(sdp) {
-            if (currentMode !== 'parent') return;
+            if (currentMode !== 'parent' || !peerConnection) return;
             
             await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
             const answer = await peerConnection.createAnswer();
@@ -209,6 +210,7 @@
             
             ws.send(JSON.stringify({
                 type: 'webrtc_answer',
+                sender: 'parent',
                 sdp: peerConnection.localDescription
             }));
         }
