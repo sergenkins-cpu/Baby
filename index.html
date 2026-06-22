@@ -30,24 +30,25 @@
 
     <div class="card hidden" id="child-screen">
         <h3>Режим: Малыш 👶</h3>
-        <p id="c-status">Требуется доступ к датчикам</p>
-        <button id="c-start-btn" onclick="startChildMode()">Включить датчик шума</button>
-        <video id="c-preview" autoplay playsinline muted></video>
+        <p id="c-status">Энергосбережение: камера выключена</p>
+        <button id="c-start-btn" onclick="startChildMode()">Включить охрану (микрофон)</button>
+        <video id="c-preview" autoplay playsinline muted class="hidden"></video>
     </div>
 
     <div class="card hidden" id="parent-screen">
-        <h3>Режим: ...</h3>
+        <h3>Режим: Родитель 👨‍👩‍👦</h3>
         <p id="p-status">Подключение к сети...</p>
-        <div id="alarm" class="alert hidden">⚠️ РЕБЕНОК ПЛАЧЕТ!</div>
-        <button id="connect-btn" class="hidden" onclick="requestVideo()">📺 Включить видеопоток</button>
+        <div id="alarm" class="alert hidden">⚠️ РЕБЕНОК ПЛАЧЕТ! ИДЕТ ТРАНСЛЯЦИЯ</div>
         <video id="p-stream" autoplay playsinline></video>
     </div>
 
     <script>
         let currentMode = "";
-        let localStream = null;
+        let audioStream = null;
+        let fullMediaStream = null;
         let peerConnection = null;
         let ws = null;
+        let isCrying = false;
 
         const roomId = "sergenkins_cpu_baby_room";
         const wsUrl = `wss://api.piesocket.com/v3/${roomId}?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3YfV0w9IpSg9B&notify=1`;
@@ -65,8 +66,7 @@
             document.getElementById(`${mode}-screen`).classList.remove('hidden');
             
             if (mode === 'parent') {
-                document.getElementById('parent-screen').getElementsByTagName('h3')[0].innerText = "Режим: Родитель 👨‍👩‍👦";
-                createPeerConnection(); // Создаем соединение заранее
+                createPeerConnection();
             }
             connectToSignaling();
         }
@@ -76,7 +76,7 @@
             
             ws.onopen = () => {
                 if (currentMode === 'parent') {
-                    document.getElementById('p-status').innerText = "Слушаю комнату... Ожидание звуков.";
+                    document.getElementById('p-status').innerText = "Слушаю комнату... Камера ребенка спит.";
                     document.getElementById('p-status').classList.add('status-active');
                 }
             };
@@ -86,17 +86,16 @@
                 if (data.sender === currentMode) return; // Игнорируем эхо
 
                 if (currentMode === 'parent') {
-                    if (data.type === 'cry_alert') {
+                    if (data.type === 'webrtc_offer') {
                         triggerAlarm();
-                    } else if (data.type === 'webrtc_offer') {
                         handleVideoOffer(data.sdp);
+                    } else if (data.type === 'child_calmed_down') {
+                        resetAlarm();
                     }
                 } 
                 
                 if (currentMode === 'child') {
-                    if (data.type === 'request_video_offer') {
-                        sendVideoOffer();
-                    } else if (data.type === 'webrtc_answer') {
+                    if (data.type === 'webrtc_answer') {
                         if (peerConnection) {
                             await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
                         }
@@ -109,23 +108,24 @@
             };
         }
 
-        // --- ЛОГИКА МАЛЫША ---
+        // --- ЛОГИКА МАЛЫША (ЭКОНОМИЯ БАТАРЕИ) ---
         async function startChildMode() {
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-                document.getElementById('c-preview').srcObject = localStream;
+                // Запрашиваем ТОЛЬКО аудио для экономии батареи
+                audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
                 document.getElementById('c-start-btn').classList.add('hidden');
-                document.getElementById('c-status').innerText = "Система активна. Анализ звука...";
+                document.getElementById('c-status').innerText = "Режим охраны активен. Камера выключена.";
                 document.getElementById('c-status').classList.add('status-active');
+                
                 startAudioAnalysis();
             } catch (err) {
-                alert("Пожалуйста, разрешите доступ к камере и микрофону в настройках браузера.");
+                alert("Пожалуйста, разрешите доступ к микрофону.");
             }
         }
 
         function startAudioAnalysis() {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            const source = audioContext.createMediaStreamSource(localStream);
+            const source = audioContext.createMediaStreamSource(audioStream);
             const analyser = audioContext.createAnalyser();
             analyser.fftSize = 256;
             source.connect(analyser);
@@ -133,42 +133,84 @@
             const bufferLength = analyser.frequencyBinCount;
             const dataArray = new Uint8Array(bufferLength);
 
-            setInterval(() => {
+            let silenceCounter = 0;
+
+            setInterval(async () => {
                 analyser.getByteFrequencyData(dataArray);
                 let total = 0;
                 for (let i = 0; i < bufferLength; i++) { total += dataArray[i]; }
                 let average = total / bufferLength;
 
-                if (average > 15) {
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ type: 'cry_alert', sender: 'child' }));
+                // Порог шума = 12 (чувствительный для iOS микрофонов)
+                if (average > 12) {
+                    silenceCounter = 0;
+                    if (!isCrying) {
+                        isCrying = true;
+                        document.getElementById('c-status').innerText = "Обнаружен шум! Включаю камеру...";
+                        await activateCameraAndStream();
+                    }
+                } else {
+                    if (isCrying) {
+                        silenceCounter++;
+                        // Если в комнате тихо больше 10 секунд (25 * 400мс), выключаем камеру назад
+                        if (silenceCounter > 25) {
+                            isCrying = false;
+                            stopCameraAndStream();
+                        }
                     }
                 }
             }, 400);
         }
 
-        async function sendVideoOffer() {
-            if (!localStream) return;
-            
-            if (peerConnection) { peerConnection.close(); }
-            peerConnection = new RTCPeerConnection(rtcConfig);
-            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+        async function activateCameraAndStream() {
+            try {
+                // Включаем камеру и микрофон на полную мощность
+                fullMediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: "user" } });
+                
+                const preview = document.getElementById('c-preview');
+                preview.srcObject = fullMediaStream;
+                preview.classList.remove('hidden');
 
-            peerConnection.onicecandidate = (event) => {
-                if (!event.candidate && peerConnection.localDescription) {
-                    ws.send(JSON.stringify({
-                        type: 'webrtc_offer',
-                        sender: 'child',
-                        sdp: peerConnection.localDescription
-                    }));
-                }
-            };
+                // Инициализируем WebRTC соединение от ребенка к родителю
+                if (peerConnection) { peerConnection.close(); }
+                peerConnection = new RTCPeerConnection(rtcConfig);
+                
+                fullMediaStream.getTracks().forEach(track => peerConnection.addTrack(track, fullMediaStream));
 
-            const offer = await peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
+                peerConnection.onicecandidate = (event) => {
+                    if (!event.candidate && peerConnection.localDescription) {
+                        ws.send(JSON.stringify({
+                            type: 'webrtc_offer',
+                            sender: 'child',
+                            sdp: peerConnection.localDescription
+                        }));
+                    }
+                };
+
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+            } catch (e) {
+                console.error("Не удалось запустить камеру при тревоге", e);
+            }
         }
 
-        // --- ЛОГИКА РОДИТЕЛЯ ---
+        function stopCameraAndStream() {
+            document.getElementById('c-status').innerText = "Малыш успокоился. Камера отключена для экономии батареи.";
+            document.getElementById('c-preview').classList.add('hidden');
+            
+            if (fullMediaStream) {
+                fullMediaStream.getTracks().forEach(track => track.stop());
+            }
+            if (peerConnection) {
+                peerConnection.close();
+            }
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'child_calmed_down', sender: 'child' }));
+            }
+        }
+
+        // --- ЛОГИКА РОДИТЕЛЯ (АВТОМАТИЧЕСКИЙ ПРИЕМ) ---
         function createPeerConnection() {
             peerConnection = new RTCPeerConnection(rtcConfig);
             
@@ -176,29 +218,26 @@
                 const remoteVideo = document.getElementById('p-stream');
                 if (remoteVideo.srcObject !== event.streams[0]) {
                     remoteVideo.srcObject = event.streams[0];
-                    document.getElementById('p-status').innerText = "Трансляция видео подключена.";
+                    document.getElementById('p-status').innerText = "Связь установлена. Видео транслируется.";
                 }
             };
         }
 
         function triggerAlarm() {
             document.getElementById('alarm').classList.remove('hidden');
-            document.getElementById('connect-btn').classList.remove('hidden');
             
-            const speech = new SpeechSynthesisUtterance("Внимание! Малыш плачет!");
+            // Голосовое оповещение срабатывает мгновенно
+            const speech = new SpeechSynthesisUtterance("Внимание! Обнаружен шум в комнате!");
             speech.lang = "ru-RU";
             window.speechSynthesis.speak(speech);
         }
 
-        function requestVideo() {
+        function resetAlarm() {
             document.getElementById('alarm').classList.add('hidden');
-            document.getElementById('connect-btn').classList.add('hidden');
-            
-            if (!peerConnection) { createPeerConnection(); }
-
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'request_video_offer', sender: 'parent' }));
-            }
+            document.getElementById('p-status').innerText = "Малыш уснул. Камера отключена.";
+            const remoteVideo = document.getElementById('p-stream');
+            remoteVideo.srcObject = null;
+            createPeerConnection(); // Пересоздаем для следующего сеанса связи
         }
 
         async function handleVideoOffer(sdp) {
